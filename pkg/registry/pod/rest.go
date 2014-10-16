@@ -208,13 +208,13 @@ func (rs *REST) fillPodInfo(pod *api.Pod) {
 	// Get cached info for the list currently.
 	// TODO: Optionally use fresh info
 	if rs.podCache != nil {
-		info, err := rs.podCache.GetPodInfo(pod.CurrentState.Host, pod.ID)
+		info, err := rs.podCache.GetPodInfo(pod.CurrentState.Host, pod.Namespace, pod.ID)
 		if err != nil {
 			if err != client.ErrPodInfoNotAvailable {
 				glog.Errorf("Error getting container info from cache: %#v", err)
 			}
 			if rs.podInfoGetter != nil {
-				info, err = rs.podInfoGetter.GetPodInfo(pod.CurrentState.Host, pod.ID)
+				info, err = rs.podInfoGetter.GetPodInfo(pod.CurrentState.Host, pod.Namespace, pod.ID)
 			}
 			if err != nil {
 				if err != client.ErrPodInfoNotAvailable {
@@ -311,7 +311,7 @@ func getPodStatus(pod *api.Pod, minions client.MinionInterface) (api.PodStatus, 
 		}
 	}
 	switch {
-	case running > 0 && stopped == 0 && unknown == 0:
+	case running > 0 && unknown == 0:
 		return api.PodRunning, nil
 	case running == 0 && stopped > 0 && unknown == 0:
 		return api.PodTerminated, nil

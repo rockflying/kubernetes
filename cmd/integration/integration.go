@@ -60,7 +60,7 @@ var (
 
 type fakePodInfoGetter struct{}
 
-func (fakePodInfoGetter) GetPodInfo(host, podID string) (api.PodInfo, error) {
+func (fakePodInfoGetter) GetPodInfo(host, podNamespace, podID string) (api.PodInfo, error) {
 	// This is a horrible hack to get around the fact that we can't provide
 	// different port numbers per kubelet...
 	var c client.PodInfoGetter
@@ -76,9 +76,9 @@ func (fakePodInfoGetter) GetPodInfo(host, podID string) (api.PodInfo, error) {
 			Port:   10251,
 		}
 	default:
-		glog.Fatalf("Can't get info for: '%v', '%v'", host, podID)
+		glog.Fatalf("Can't get info for: '%v', '%v - %v'", host, podNamespace, podID)
 	}
-	return c.GetPodInfo("localhost", podID)
+	return c.GetPodInfo("localhost", podNamespace, podID)
 }
 
 type delegateHandler struct {
@@ -137,10 +137,7 @@ func startComponents(manifestURL string) (apiServerURL string) {
 
 	// Scheduler
 	schedulerConfigFactory := &factory.ConfigFactory{cl}
-	schedulerConfig, err := schedulerConfigFactory.Create()
-	if err != nil {
-		glog.Fatalf("Unable to construct scheduler config: %v", err)
-	}
+	schedulerConfig := schedulerConfigFactory.Create()
 	scheduler.New(schedulerConfig).Run()
 
 	endpoints := service.NewEndpointController(cl)
@@ -160,7 +157,7 @@ func startComponents(manifestURL string) (apiServerURL string) {
 	myKubelet := kubelet.NewIntegrationTestKubelet(machineList[0], testRootDir, &fakeDocker1)
 	go util.Forever(func() { myKubelet.Run(cfg1.Updates()) }, 0)
 	go util.Forever(func() {
-		kubelet.ListenAndServeKubeletServer(myKubelet, cfg1.Channel("http"), net.ParseIP("127.0.0.1"), 10250)
+		kubelet.ListenAndServeKubeletServer(myKubelet, cfg1.Channel("http"), net.ParseIP("127.0.0.1"), 10250, true)
 	}, 0)
 
 	// Kubelet (machine)
@@ -171,7 +168,7 @@ func startComponents(manifestURL string) (apiServerURL string) {
 	otherKubelet := kubelet.NewIntegrationTestKubelet(machineList[1], testRootDir, &fakeDocker2)
 	go util.Forever(func() { otherKubelet.Run(cfg2.Updates()) }, 0)
 	go util.Forever(func() {
-		kubelet.ListenAndServeKubeletServer(otherKubelet, cfg2.Channel("http"), net.ParseIP("127.0.0.1"), 10251)
+		kubelet.ListenAndServeKubeletServer(otherKubelet, cfg2.Channel("http"), net.ParseIP("127.0.0.1"), 10251, true)
 	}, 0)
 
 	return apiServer.URL
@@ -182,11 +179,11 @@ func podsOnMinions(c *client.Client, pods api.PodList) wait.ConditionFunc {
 	podInfo := fakePodInfoGetter{}
 	return func() (bool, error) {
 		for i := range pods.Items {
-			host, id := pods.Items[i].CurrentState.Host, pods.Items[i].ID
+			host, id, namespace := pods.Items[i].CurrentState.Host, pods.Items[i].ID, pods.Items[i].Namespace
 			if len(host) == 0 {
 				return false, nil
 			}
-			if _, err := podInfo.GetPodInfo(host, id); err != nil {
+			if _, err := podInfo.GetPodInfo(host, namespace, id); err != nil {
 				return false, nil
 			}
 		}

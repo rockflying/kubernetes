@@ -17,6 +17,7 @@ limitations under the License.
 package validation
 
 import (
+	"reflect"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
@@ -33,10 +34,13 @@ func validateVolumes(volumes []api.Volume) (util.StringSet, errs.ErrorList) {
 	for i := range volumes {
 		vol := &volumes[i] // so we can set default values
 		el := errs.ErrorList{}
-		// TODO(thockin) enforce that a source is set once we deprecate the implied form.
-		if vol.Source != nil {
-			el = validateSource(vol.Source).Prefix("source")
+		if vol.Source == nil {
+			// TODO: Enforce that a source is set once we deprecate the implied form.
+			vol.Source = &api.VolumeSource{
+				EmptyDir: &api.EmptyDir{},
+			}
 		}
+		el = validateSource(vol.Source).Prefix("source")
 		if len(vol.Name) == 0 {
 			el = append(el, errs.NewFieldRequired("name", vol.Name))
 		} else if !util.IsDNSLabel(vol.Name) {
@@ -253,7 +257,7 @@ func validateContainers(containers []api.Container, volumes util.StringSet) errs
 		} else if allNames.Has(ctr.Name) {
 			cErrs = append(cErrs, errs.NewFieldDuplicate("name", ctr.Name))
 		} else if ctr.Privileged && !capabilities.AllowPrivileged {
-			cErrs = append(cErrs, errs.NewFieldInvalid("privileged", ctr.Privileged))
+			cErrs = append(cErrs, errs.NewFieldForbidden("privileged", ctr.Privileged))
 		} else {
 			allNames.Insert(ctr.Name)
 		}
@@ -335,6 +339,34 @@ func ValidatePod(pod *api.Pod) errs.ErrorList {
 		allErrs = append(allErrs, errs.NewFieldInvalid("namespace", pod.Namespace))
 	}
 	allErrs = append(allErrs, ValidatePodState(&pod.DesiredState).Prefix("desiredState")...)
+	return allErrs
+}
+
+// ValidatePodUpdate tests to see if the update is legal
+func ValidatePodUpdate(newPod, oldPod *api.Pod) errs.ErrorList {
+	allErrs := errs.ErrorList{}
+
+	if newPod.ID != oldPod.ID {
+		allErrs = append(allErrs, errs.NewFieldInvalid("ID", newPod.ID))
+	}
+
+	if len(newPod.DesiredState.Manifest.Containers) != len(oldPod.DesiredState.Manifest.Containers) {
+		allErrs = append(allErrs, errs.NewFieldInvalid("DesiredState.Manifest.Containers", newPod.DesiredState.Manifest.Containers))
+		return allErrs
+	}
+	pod := *newPod
+	pod.Labels = oldPod.Labels
+	pod.TypeMeta.ResourceVersion = oldPod.TypeMeta.ResourceVersion
+	// Tricky, we need to copy the container list so that we don't overwrite the update
+	var newContainers []api.Container
+	for ix, container := range pod.DesiredState.Manifest.Containers {
+		container.Image = oldPod.DesiredState.Manifest.Containers[ix].Image
+		newContainers = append(newContainers, container)
+	}
+	pod.DesiredState.Manifest.Containers = newContainers
+	if !reflect.DeepEqual(pod.DesiredState.Manifest, oldPod.DesiredState.Manifest) {
+		allErrs = append(allErrs, errs.NewFieldInvalid("DesiredState.Manifest.Containers", newPod.DesiredState.Manifest.Containers))
+	}
 	return allErrs
 }
 

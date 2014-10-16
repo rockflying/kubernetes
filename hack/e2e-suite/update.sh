@@ -20,8 +20,9 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-source "${KUBE_REPO_ROOT}/cluster/kube-env.sh"
-source "${KUBE_REPO_ROOT}/cluster/$KUBERNETES_PROVIDER/util.sh"
+KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
+source "${KUBE_ROOT}/cluster/kube-env.sh"
+source "${KUBE_ROOT}/cluster/$KUBERNETES_PROVIDER/util.sh"
 
 
 CONTROLLER_NAME=update-demo
@@ -43,11 +44,36 @@ function validate() {
 
     local id
     num_running=0
-    for id in "${pod_id_list[@]}"; do
+    for id in "${pod_id_list[@]+${pod_id_list[@]}}"; do
       local template_string current_status current_image host_ip
+
+      # NB: This template string is a little subtle.
+      #
+      # Notes:
+      #
+      # The 'and' operator will return blank if any of the inputs are non-
+      # nil/false.  If they are all set, then it'll return the last one.
+      #
+      # The container is name has a dash in it and so we can't use the simple
+      # syntax.  Instead we need to quote that and use the 'index' operator.
+      #
+      # The value here is a structure with just a Time member.  This is
+      # currently always set to a zero time.
+      #
+      # You can read about the syntax here: http://golang.org/pkg/text/template/
       template_string="{{and ((index .CurrentState.Info \"${CONTROLLER_NAME}\").State.Running) .CurrentState.Info.net.State.Running}}"
-      current_status=$($KUBECFG -template="${template_string}" get "pods/$id")
-      if [ "$current_status" != "{0001-01-01 00:00:00 +0000 UTC}" ]; then
+      current_status=$($KUBECFG -template="${template_string}" get "pods/$id") || {
+        if [[ $current_status =~ "pod \"${id}\" not found" ]]; then
+          echo "  $id no longer exists"
+          continue
+        else
+          echo "  kubecfg failed with error:"
+          echo $current_status
+          exit -1
+        fi
+      }
+
+      if [[ "$current_status" != "{0001-01-01 00:00:00 +0000 UTC}" ]]; then
         echo "  $id is created but not running"
         continue
       fi
@@ -79,26 +105,26 @@ function validate() {
 export DOCKER_HUB_USER=jbeda
 
 # Launch a container
-${KUBE_REPO_ROOT}/examples/update-demo/2-create-replication-controller.sh
+${KUBE_ROOT}/examples/update-demo/2-create-replication-controller.sh
 
 function teardown() {
   echo "Cleaning up test artifacts"
-  ${KUBE_REPO_ROOT}/examples/update-demo/5-down.sh
+  ${KUBE_ROOT}/examples/update-demo/5-down.sh
 }
 
 trap "teardown" EXIT
 
 validate 2 nautilus
 
-${KUBE_REPO_ROOT}/examples/update-demo/3-scale.sh 1
+${KUBE_ROOT}/examples/update-demo/3-scale.sh 1
 sleep 2
 validate 1 nautilus
 
-${KUBE_REPO_ROOT}/examples/update-demo/3-scale.sh 2
+${KUBE_ROOT}/examples/update-demo/3-scale.sh 2
 sleep 2
 validate 2 nautilus
 
-${KUBE_REPO_ROOT}/examples/update-demo/4-rolling-update.sh kitten 1s
+${KUBE_ROOT}/examples/update-demo/4-rolling-update.sh kitten 1s
 sleep 2
 validate 2 kitten
 

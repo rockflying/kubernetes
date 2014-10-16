@@ -27,18 +27,19 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
+	cloudcontroller "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/binding"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/endpoint"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/etcd"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/event"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/generic"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/minion"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/pod"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/service"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-
-	"github.com/golang/glog"
 )
 
 // Config is a structure used to configure a Master.
@@ -49,6 +50,7 @@ type Config struct {
 	HealthCheckMinions bool
 	Minions            []string
 	MinionCacheTTL     time.Duration
+	EventTTL           time.Duration
 	MinionRegexp       string
 	PodInfoGetter      client.PodInfoGetter
 	NodeResources      api.NodeResources
@@ -62,6 +64,7 @@ type Master struct {
 	endpointRegistry   endpoint.Registry
 	minionRegistry     minion.Registry
 	bindingRegistry    binding.Registry
+	eventRegistry      generic.Registry
 	storage            map[string]apiserver.RESTStorage
 	client             *client.Client
 }
@@ -92,61 +95,52 @@ func New(c *Config) *Master {
 		serviceRegistry:    serviceRegistry,
 		endpointRegistry:   etcd.NewRegistry(c.EtcdHelper, nil),
 		bindingRegistry:    etcd.NewRegistry(c.EtcdHelper, manifestFactory),
+		eventRegistry:      event.NewEtcdRegistry(c.EtcdHelper, uint64(c.EventTTL.Seconds())),
 		minionRegistry:     minionRegistry,
 		client:             c.Client,
 	}
-	m.init(c.Cloud, c.PodInfoGetter)
+	m.init(c)
 	return m
 }
 
 func makeMinionRegistry(c *Config) minion.Registry {
-	var minionRegistry minion.Registry
-	if c.Cloud != nil && len(c.MinionRegexp) > 0 {
-		var err error
-		minionRegistry, err = minion.NewCloudRegistry(c.Cloud, c.MinionRegexp, &c.NodeResources)
-		if err != nil {
-			glog.Errorf("Failed to initalize cloud minion registry reverting to static registry (%#v)", err)
-		}
+	var minionRegistry minion.Registry = etcd.NewRegistry(c.EtcdHelper, nil)
+	if c.HealthCheckMinions {
+		minionRegistry = minion.NewHealthyRegistry(minionRegistry, &http.Client{})
 	}
-	if minionRegistry == nil {
-		minionRegistry = etcd.NewRegistry(c.EtcdHelper, nil)
+	return minionRegistry
+}
+
+// init initializes master.
+func (m *Master) init(c *Config) {
+	podCache := NewPodCache(c.PodInfoGetter, m.podRegistry)
+	go util.Forever(func() { podCache.UpdateAllContainers() }, time.Second*30)
+
+	if c.Cloud != nil && len(c.MinionRegexp) > 0 {
+		// TODO: Move minion controller to its own code.
+		cloudcontroller.NewMinionController(c.Cloud, c.MinionRegexp, &c.NodeResources, m.minionRegistry, c.MinionCacheTTL).Run()
+	} else {
 		for _, minionID := range c.Minions {
-			minionRegistry.CreateMinion(nil, &api.Minion{
+			m.minionRegistry.CreateMinion(nil, &api.Minion{
 				TypeMeta:      api.TypeMeta{ID: minionID},
 				NodeResources: c.NodeResources,
 			})
 		}
 	}
-	if c.HealthCheckMinions {
-		minionRegistry = minion.NewHealthyRegistry(minionRegistry, &http.Client{})
-	}
-	if c.MinionCacheTTL > 0 {
-		cachingMinionRegistry, err := minion.NewCachingRegistry(minionRegistry, c.MinionCacheTTL)
-		if err != nil {
-			glog.Errorf("Failed to initialize caching layer, ignoring cache.")
-		} else {
-			minionRegistry = cachingMinionRegistry
-		}
-	}
-	return minionRegistry
-}
-
-func (m *Master) init(cloud cloudprovider.Interface, podInfoGetter client.PodInfoGetter) {
-	podCache := NewPodCache(podInfoGetter, m.podRegistry)
-	go util.Forever(func() { podCache.UpdateAllContainers() }, time.Second*30)
 
 	m.storage = map[string]apiserver.RESTStorage{
 		"pods": pod.NewREST(&pod.RESTConfig{
-			CloudProvider: cloud,
+			CloudProvider: c.Cloud,
 			PodCache:      podCache,
-			PodInfoGetter: podInfoGetter,
+			PodInfoGetter: c.PodInfoGetter,
 			Registry:      m.podRegistry,
 			Minions:       m.client,
 		}),
 		"replicationControllers": controller.NewREST(m.controllerRegistry, m.podRegistry),
-		"services":               service.NewREST(m.serviceRegistry, cloud, m.minionRegistry),
+		"services":               service.NewREST(m.serviceRegistry, c.Cloud, m.minionRegistry),
 		"endpoints":              endpoint.NewREST(m.endpointRegistry),
 		"minions":                minion.NewREST(m.minionRegistry),
+		"events":                 event.NewREST(m.eventRegistry),
 
 		// TODO: should appear only in scheduler API group.
 		"bindings": binding.NewREST(m.bindingRegistry),

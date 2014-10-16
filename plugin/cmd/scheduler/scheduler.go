@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	masterPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/master"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
@@ -55,13 +56,12 @@ func main() {
 		glog.Fatalf("Invalid API configuration: %v", err)
 	}
 
+	record.StartRecording(kubeClient, "scheduler")
+
 	go http.ListenAndServe(net.JoinHostPort(address.String(), strconv.Itoa(*port)), nil)
 
 	configFactory := &factory.ConfigFactory{Client: kubeClient}
-	config, err := configFactory.Create()
-	if err != nil {
-		glog.Fatalf("Can't create scheduler config: %v", err)
-	}
+	config := configFactory.Create()
 	s := scheduler.New(config)
 	s.Run()
 
